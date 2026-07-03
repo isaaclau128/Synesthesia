@@ -44,6 +44,16 @@ app.innerHTML = `
           <span>Pedal</span>
           <strong id="pedal">Off</strong>
         </div>
+
+        <div class="meter-card">
+          <span>Pitch</span>
+          <strong id="pitch">--</strong>
+        </div>
+
+        <div class="meter-card">
+          <span>Mode</span>
+          <strong id="mode">Fugue</strong>
+        </div>
       </div>
     </section>
   </main>
@@ -56,6 +66,8 @@ const demoButton = document.querySelector('#demo-mode');
 const statusLabel = document.querySelector('#status');
 const intensityLabel = document.querySelector('#intensity');
 const pedalLabel = document.querySelector('#pedal');
+const pitchLabel = document.querySelector('#pitch');
+const modeLabel = document.querySelector('#mode');
 const sensitivitySlider = document.querySelector('#sensitivity');
 
 const state = {
@@ -79,10 +91,17 @@ const state = {
     attack: 0,
     sustain: 0,
     pedal: 0,
+    pitchHz: 0,
+    pitchConfidence: 0,
+    texture: 0,
+    mode: 'Fugue',
+    noteName: '--',
+    spectralEntropy: 0,
     bass: 0,
     mid: 0,
     treble: 0,
   },
+  pitchTrail: [],
 };
 
 const palette = {
@@ -147,8 +166,126 @@ function updateSensitivity(value) {
   document.documentElement.style.setProperty('--sensitivity', String(state.sensitivity));
 }
 
+function frequencyToNoteName(frequency) {
+  if (!frequency || !Number.isFinite(frequency)) {
+    return '--';
+  }
+
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
+  const noteName = noteNames[((midi % 12) + 12) % 12];
+  const octave = Math.floor(midi / 12) - 1;
+
+  return `${noteName}${octave}`;
+}
+
+function estimatePitch(timeData, sampleRate) {
+  const sampleCount = Math.min(timeData.length, 1024);
+  const buffer = new Float32Array(sampleCount);
+
+  let mean = 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const value = (timeData[index] - 128) / 128;
+    buffer[index] = value;
+    mean += value;
+  }
+
+  mean /= sampleCount;
+
+  let rms = 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const centered = buffer[index] - mean;
+    buffer[index] = centered;
+    rms += centered * centered;
+  }
+
+  rms = Math.sqrt(rms / sampleCount);
+  if (rms < 0.012) {
+    return { frequency: 0, confidence: 0, rms };
+  }
+
+  const minLag = Math.floor(sampleRate / 1100);
+  const maxLag = Math.floor(sampleRate / 80);
+  let bestLag = 0;
+  let bestCorr = 0;
+
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    let correlation = 0;
+    let norm = 0;
+
+    for (let index = 0; index < sampleCount - lag; index += 1) {
+      const a = buffer[index];
+      const b = buffer[index + lag];
+      correlation += a * b;
+      norm += a * a + b * b;
+    }
+
+    if (norm <= 0) {
+      continue;
+    }
+
+    const normalizedCorrelation = correlation / Math.sqrt(norm);
+    if (normalizedCorrelation > bestCorr) {
+      bestCorr = normalizedCorrelation;
+      bestLag = lag;
+    }
+  }
+
+  if (!bestLag || bestCorr < 0.18) {
+    return { frequency: 0, confidence: 0, rms };
+  }
+
+  return {
+    frequency: sampleRate / bestLag,
+    confidence: clamp((bestCorr - 0.18) / 0.52, 0, 1),
+    rms,
+  };
+}
+
+function estimateTexture(frequencyData, pitchConfidence) {
+  let entropy = 0;
+  let flatnessLog = 0;
+  let flux = 0;
+  let previous = 0;
+  let total = 0;
+
+  for (let index = 0; index < frequencyData.length; index += 1) {
+    const value = frequencyData[index] / 255;
+    total += value;
+    if (value > 0) {
+      flatnessLog += Math.log(value + 1e-6);
+    }
+
+    if (index > 0) {
+      flux += Math.abs(value - previous);
+    }
+
+    previous = value;
+  }
+
+  const binCount = frequencyData.length || 1;
+  const normalizedTotal = total || 1;
+
+  for (let index = 0; index < frequencyData.length; index += 1) {
+    const value = frequencyData[index] / 255;
+    const probability = value / normalizedTotal;
+    if (probability > 0) {
+      entropy -= probability * Math.log2(probability);
+    }
+  }
+
+  const entropyNorm = entropy / Math.log2(binCount);
+  const flatness = Math.exp(flatnessLog / binCount) / ((total / binCount) + 1e-6);
+  const fluxNorm = flux / binCount;
+
+  return {
+    entropyNorm,
+    density: clamp(entropyNorm * 0.5 + flatness * 0.18 + fluxNorm * 0.35 + (1 - pitchConfidence) * 0.42, 0, 1),
+  };
+}
+
 function analyzeFrequencyBands() {
-  const { frequencyData } = state;
+  const { frequencyData, timeData } = state;
   const bassEnd = Math.floor(frequencyData.length * 0.08);
   const midEnd = Math.floor(frequencyData.length * 0.33);
 
@@ -176,6 +313,8 @@ function analyzeFrequencyBands() {
 
   const nextEnergy = total / frequencyData.length;
   const energyRise = Math.max(0, nextEnergy - state.metrics.energy);
+  const pitch = estimatePitch(timeData, state.audioContext.sampleRate);
+  const texture = estimateTexture(frequencyData, pitch.confidence);
 
   state.metrics.previousEnergy = state.metrics.energy;
   state.metrics.attack = energyRise;
@@ -185,6 +324,21 @@ function analyzeFrequencyBands() {
   state.metrics.bass = bass / bassWeight;
   state.metrics.mid = mid / midWeight;
   state.metrics.treble = treble / trebleWeight;
+  state.metrics.pitchHz = pitch.frequency;
+  state.metrics.pitchConfidence = pitch.confidence;
+  state.metrics.texture = texture.density;
+  state.metrics.spectralEntropy = texture.entropyNorm;
+  state.metrics.mode = texture.density > 0.5 || pitch.confidence < 0.35 ? 'Impressionism' : 'Fugue';
+  state.metrics.noteName = pitch.frequency ? frequencyToNoteName(pitch.frequency) : '--';
+
+  if (pitch.frequency && pitch.confidence > 0.25) {
+    state.pitchTrail.push({ frequency: pitch.frequency, confidence: pitch.confidence });
+    if (state.pitchTrail.length > 48) {
+      state.pitchTrail.shift();
+    }
+  } else if (state.pitchTrail.length > 0) {
+    state.pitchTrail.shift();
+  }
 }
 
 function spawnParticles(amount, centerX, centerY, burst, hueMix, intensity = 1) {
@@ -214,11 +368,14 @@ function spawnParticles(amount, centerX, centerY, burst, hueMix, intensity = 1) 
 }
 
 function drawBackground(width, height, time) {
-  const { attack, sustain, pedal, bass, mid, treble } = state.metrics;
+  const { attack, sustain, pedal, bass, mid, treble, pitchHz, pitchConfidence, texture } = state.metrics;
 
-  const pulseX = width * (0.25 + mid * 0.35);
-  const pulseY = height * (0.35 + treble * 0.25);
-  const bloom = clamp(0.28 + sustain * 1.05 + attack * 1.5 + pedal * 0.55, 0.28, 1.8);
+  const pitchMix = pitchHz ? clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1) : 0.5;
+  const pitchX = mix(width * 0.18, width * 0.82, pitchMix);
+  const pitchY = mix(height * 0.76, height * 0.22, pitchMix);
+  const pulseX = mix(width * (0.25 + mid * 0.35), pitchX, pitchConfidence * 0.65);
+  const pulseY = mix(height * (0.35 + treble * 0.25), pitchY, pitchConfidence * 0.65);
+  const bloom = clamp(0.28 + sustain * 1.05 + attack * 1.5 + pedal * 0.55 + texture * 0.35, 0.28, 1.95);
   const hueLift = clamp((bass * 180) + (treble * 90), 0, 240);
 
   const gradient = ctx.createRadialGradient(pulseX, pulseY, 20, pulseX, pulseY, Math.max(width, height) * 0.85);
@@ -234,7 +391,7 @@ function drawBackground(width, height, time) {
   ctx.globalCompositeOperation = 'screen';
 
   for (const star of state.stars) {
-    star.twinkle += 0.004 + sustain * 0.01 + attack * 0.02 + pedal * 0.006;
+    star.twinkle += 0.004 + sustain * 0.01 + attack * 0.02 + pedal * 0.006 + texture * 0.003;
     const twinkle = (Math.sin(star.twinkle + time * 0.001) + 1) / 2;
     ctx.fillStyle = `rgba(${hueLift}, ${180 + treble * 50}, ${220 - bass * 40}, ${0.08 + twinkle * 0.16})`;
     ctx.beginPath();
@@ -250,7 +407,8 @@ function drawWaveRing(width, height) {
   const centerX = width / 2;
   const centerY = height / 2;
   const maxRadius = Math.min(width, height) * 0.28;
-  const baseRadius = maxRadius * (0.72 + state.metrics.sustain * 0.82 + state.metrics.attack * 0.6 + state.metrics.pedal * 0.35);
+  const modeFactor = state.metrics.mode === 'Impressionism' ? 1.28 : 0.94;
+  const baseRadius = maxRadius * (0.72 + state.metrics.sustain * 0.82 + state.metrics.attack * 0.6 + state.metrics.pedal * 0.35) * modeFactor;
 
   ctx.save();
   ctx.translate(centerX, centerY);
@@ -263,7 +421,7 @@ function drawWaveRing(width, height) {
     for (let index = 0; index < frequencyData.length; index += 10) {
       const angle = (index / frequencyData.length) * Math.PI * 2;
       const sample = frequencyData[index] / 255;
-      const wobble = sample * (11 + ring * 6) * state.sensitivity;
+      const wobble = sample * (11 + ring * 6) * state.sensitivity * modeFactor;
       const x = Math.cos(angle) * (radius + wobble);
       const y = Math.sin(angle) * (radius + wobble);
       if (index === 0) {
@@ -273,8 +431,8 @@ function drawWaveRing(width, height) {
       }
     }
     ctx.closePath();
-    ctx.strokeStyle = ring === 0 ? rgba(palette.accentA, 0.24) : ring === 1 ? rgba(palette.accentB, 0.2) : rgba(palette.accentC, 0.16);
-    ctx.shadowBlur = 18 + state.metrics.sustain * 12 + state.metrics.pedal * 10;
+    ctx.strokeStyle = ring === 0 ? rgba(palette.accentA, state.metrics.mode === 'Impressionism' ? 0.18 : 0.24) : ring === 1 ? rgba(palette.accentB, state.metrics.mode === 'Impressionism' ? 0.16 : 0.2) : rgba(palette.accentC, state.metrics.mode === 'Impressionism' ? 0.14 : 0.16);
+    ctx.shadowBlur = 18 + state.metrics.sustain * 12 + state.metrics.pedal * 10 + (state.metrics.mode === 'Impressionism' ? 8 : 0);
     ctx.shadowColor = ring === 0 ? rgba(palette.accentA, 0.8) : ring === 1 ? rgba(palette.accentB, 0.75) : rgba(palette.accentC, 0.7);
     ctx.stroke();
   }
@@ -286,6 +444,7 @@ function drawParticles(width, height, time) {
   const centerX = width / 2;
   const centerY = height / 2;
   const gravity = 0.006 + state.metrics.bass * 0.02 - state.metrics.pedal * 0.003;
+  const modeFactor = state.metrics.mode === 'Impressionism' ? 1.1 : 0.92;
 
   ctx.save();
   ctx.globalCompositeOperation = 'screen';
@@ -301,9 +460,9 @@ function drawParticles(width, height, time) {
 
     const progress = particle.age / particle.life;
     const alpha = Math.max(0, 1 - progress);
-    const size = particle.size * (1 + state.metrics.sustain * 0.65 + state.metrics.pedal * 0.25 + particle.intensity * 0.35);
+    const size = particle.size * (1 + state.metrics.sustain * 0.65 + state.metrics.pedal * 0.25 + particle.intensity * 0.35) * modeFactor;
 
-    ctx.fillStyle = rgba(particle.color, alpha * 0.72);
+    ctx.fillStyle = rgba(particle.color, alpha * (state.metrics.mode === 'Impressionism' ? 0.56 : 0.72));
     ctx.shadowBlur = 14 + size * 2.2 + state.metrics.pedal * 6;
     ctx.shadowColor = rgba(particle.color, alpha * 0.85);
     ctx.beginPath();
@@ -343,11 +502,106 @@ function drawParticles(width, height, time) {
   ctx.restore();
 }
 
+function drawFugueMode(width, height, time) {
+  const { pitchHz, pitchConfidence, sustain } = state.metrics;
+  if (!pitchHz || pitchConfidence < 0.25) {
+    return;
+  }
+
+  const pitchMix = clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1);
+  const noteY = mix(height * 0.78, height * 0.2, pitchMix);
+  const staffTop = height * 0.2;
+  const staffSpacing = Math.max(12, height * 0.022);
+  const staffLeft = width * 0.08;
+  const staffRight = width * 0.92;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+
+  for (let line = 0; line < 5; line += 1) {
+    const y = staffTop + line * staffSpacing;
+    ctx.beginPath();
+    ctx.moveTo(staffLeft, y);
+    ctx.lineTo(staffRight, y + Math.sin(time * 0.0003 + line) * (1.5 + sustain * 2));
+    ctx.strokeStyle = rgba(palette.accentB, 0.07 + pitchConfidence * 0.12);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  if (state.pitchTrail.length > 1) {
+    ctx.beginPath();
+    state.pitchTrail.forEach((point, index) => {
+      const trailX = mix(staffLeft, staffRight, index / Math.max(state.pitchTrail.length - 1, 1));
+      const trailPitchMix = clamp((Math.log2(point.frequency / 55)) / 4.5, 0, 1);
+      const trailY = mix(height * 0.78, height * 0.2, trailPitchMix);
+      if (index === 0) {
+        ctx.moveTo(trailX, trailY);
+      } else {
+        ctx.lineTo(trailX, trailY);
+      }
+    });
+    ctx.strokeStyle = rgba(palette.accentA, 0.16 + pitchConfidence * 0.28);
+    ctx.lineWidth = 2 + sustain * 2.2;
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = rgba(palette.accentC, 0.18 + pitchConfidence * 0.35);
+  ctx.shadowBlur = 16 + pitchConfidence * 18;
+  ctx.shadowColor = rgba(palette.accentC, 0.7);
+  ctx.beginPath();
+  ctx.arc(width * 0.5, noteY, 10 + pitchConfidence * 16 + state.metrics.pedal * 7, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawImpressionismMode(width, height, time) {
+  const { pitchHz, pitchConfidence, texture, sustain, pedal, bass, treble } = state.metrics;
+  const pitchMix = pitchHz ? clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1) : 0.5;
+  const centerX = mix(width * 0.24, width * 0.76, pitchMix);
+  const centerY = mix(height * 0.72, height * 0.25, 1 - pitchMix * 0.7);
+  const radius = Math.min(width, height) * (0.16 + texture * 0.18 + pedal * 0.08);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+
+  for (let layer = 0; layer < 6; layer += 1) {
+    const layerAngle = time * 0.0002 + layer * 1.12;
+    const offsetX = Math.cos(layerAngle) * radius * (0.45 + layer * 0.08);
+    const offsetY = Math.sin(layerAngle * 1.17) * radius * (0.28 + layer * 0.07);
+    const cloudRadius = radius * (0.7 + layer * 0.18 + sustain * 0.2);
+    const gradient = ctx.createRadialGradient(centerX + offsetX, centerY + offsetY, 0, centerX + offsetX, centerY + offsetY, cloudRadius);
+    gradient.addColorStop(0, rgba(palette.accentA, 0.14 + texture * 0.12));
+    gradient.addColorStop(0.34, rgba(palette.accentB, 0.11 + pitchConfidence * 0.1));
+    gradient.addColorStop(0.68, rgba(palette.accentC, 0.08 + treble * 0.08));
+    gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(centerX + offsetX, centerY + offsetY, cloudRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const washCount = 5 + Math.round(texture * 5);
+  for (let index = 0; index < washCount; index += 1) {
+    const angle = (index / Math.max(washCount, 1)) * Math.PI * 2 + time * 0.0001;
+    const washRadius = radius * (0.6 + (index % 3) * 0.18 + bass * 0.12);
+    const x = centerX + Math.cos(angle) * washRadius;
+    const y = centerY + Math.sin(angle) * washRadius;
+    ctx.fillStyle = rgba(index % 2 === 0 ? palette.accentB : palette.accentA, 0.03 + texture * 0.08);
+    ctx.beginPath();
+    ctx.arc(x, y, 18 + texture * 38 + pedal * 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 function render(time) {
   const width = window.innerWidth;
   const height = window.innerHeight;
 
-  if (state.active && state.analyser) {
+  if (state.analyser && (state.active || state.demo)) {
     state.analyser.getByteFrequencyData(state.frequencyData);
     state.analyser.getByteTimeDomainData(state.timeData);
     analyzeFrequencyBands();
@@ -355,6 +609,9 @@ function render(time) {
     const energy = clamp((state.metrics.sustain * 0.85 + state.metrics.attack * 1.25) * state.sensitivity * 1.15, 0, 1);
     intensityLabel.textContent = `${Math.round(energy * 100)}%`;
     pedalLabel.textContent = `${Math.round(state.metrics.pedal * 100)}%`;
+    pitchLabel.textContent = state.metrics.noteName === '--' ? '--' : `${state.metrics.noteName} · ${Math.round(state.metrics.pitchHz)} Hz`;
+    modeLabel.textContent = state.metrics.mode;
+    setStatus(`${state.demo ? 'Demo audio' : 'Listening'} · ${state.metrics.mode}`);
 
     if (state.metrics.attack > 0.04) {
       const attackBurst = clamp(state.metrics.attack * 6, 0.8, 5.5);
@@ -369,16 +626,29 @@ function render(time) {
     state.metrics.attack *= 0.9;
     state.metrics.sustain *= 0.95;
     state.metrics.pedal *= 0.94;
+    state.metrics.pitchHz = 0;
+    state.metrics.pitchConfidence = 0;
+    state.metrics.texture *= 0.95;
+    state.metrics.mode = 'Fugue';
+    state.metrics.noteName = '--';
     state.metrics.bass *= 0.95;
     state.metrics.mid *= 0.95;
     state.metrics.treble *= 0.95;
     intensityLabel.textContent = `${Math.round(state.metrics.energy * 100)}%`;
     pedalLabel.textContent = `${Math.round(state.metrics.pedal * 100)}%`;
+    pitchLabel.textContent = '--';
+    modeLabel.textContent = 'Fugue';
+    setStatus('Idle');
   }
 
   drawBackground(width, height, time);
   drawWaveRing(width, height);
   drawParticles(width, height, time);
+  if (state.metrics.mode === 'Fugue') {
+    drawFugueMode(width, height, time);
+  } else {
+    drawImpressionismMode(width, height, time);
+  }
 
   state.animationFrame = requestAnimationFrame(render);
 }

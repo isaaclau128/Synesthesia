@@ -21,5 +21,9 @@ Then open the local URL Vite prints in your browser and allow microphone access.
 
 ```bash
 npm run build
-```# Synesthesia
-Real-time generation of artwork using live music
+```
+
+## Docs
+
+- [Art generation rules](ART_RULES.md)
+- [Acoustic pipeline and piano/classical strategy](ACOUSTIC_PIPELINE.md)
