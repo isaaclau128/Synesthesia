@@ -67,6 +67,17 @@ input {
   box-shadow: var(--shadow);
 }
 
+.hero-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hero-body {
+  margin-top: 8px;
+}
+
 .hero::before {
   content: '';
   position: absolute;
@@ -85,7 +96,6 @@ input {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 22px;
 }
 
 .badge {
@@ -151,11 +161,38 @@ button:active {
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.menu-toggle {
+  flex: none;
+  padding: 10px 14px;
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .panel-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
   margin-top: 26px;
+}
+
+.hero.is-collapsed {
+  width: auto;
+  max-width: 320px;
+  padding-bottom: 18px;
+}
+
+.hero.is-collapsed .hero-body {
+  display: none;
+}
+
+.hero.is-collapsed .hero-head {
+  align-items: center;
+}
+
+.hero.is-collapsed .badge-row {
+  margin-bottom: 0;
 }
 
 .slider-card,
@@ -205,7 +242,19 @@ input[type='range'] {
     border-radius: 22px;
   }
 
+  .hero-head {
+    align-items: center;
+  }
+
+  .menu-toggle {
+    padding: 9px 12px;
+  }
+
   .panel-grid {
     grid-template-columns: 1fr;
+  }
+
+  .hero.is-collapsed {
+    max-width: 100%;
   }
 }

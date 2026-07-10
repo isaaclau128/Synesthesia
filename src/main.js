@@ -1,4 +1,5 @@
 import './styles.css';
+import { DEFAULT_KEY_PALETTE, getKeyPalette, formatKeyName } from './palette/keyPalettes.js';
 
 const app = document.querySelector('#app');
 
@@ -6,53 +7,66 @@ app.innerHTML = `
   <main class="shell">
     <canvas id="art" aria-hidden="true"></canvas>
 
-    <section class="hero">
-      <div class="badge-row">
-        <span class="badge">Live mic</span>
-        <span class="badge">Generative art</span>
-        <span class="badge">Web Audio</span>
+    <section class="hero" id="menu" hidden>
+      <div class="hero-head">
+        <div class="badge-row">
+          <span class="badge">Live mic</span>
+          <span class="badge">Generative art</span>
+          <span class="badge">Web Audio</span>
+        </div>
+
+        <button id="toggle-menu" class="menu-toggle" aria-expanded="true" aria-controls="menu-content">
+          Minimize
+        </button>
       </div>
 
-      <h1>Turn sound into shifting light.</h1>
-      <p>
-        Synesthesia listens to your computer microphone and translates energy,
-        rhythm, and texture into a reactive canvas of color, motion, and glow.
-      </p>
+      <div id="menu-content" class="hero-body">
+        <h1>Turn sound into shifting light.</h1>
+        <p>
+          Synesthesia listens to your computer microphone and translates energy,
+          rhythm, and texture into a reactive canvas of color, motion, and glow.
+        </p>
 
-      <div class="controls">
-        <button id="toggle-mic" class="primary">Enable microphone</button>
-        <button id="demo-mode" class="secondary">Use demo audio</button>
-      </div>
-
-      <div class="panel-grid">
-        <label class="slider-card">
-          <span>Sensitivity</span>
-          <input id="sensitivity" type="range" min="0.5" max="2.5" step="0.01" value="1.25" />
-        </label>
-
-        <div class="meter-card">
-          <span>Status</span>
-          <strong id="status">Idle</strong>
+        <div class="controls">
+          <button id="toggle-mic" class="primary">Enable microphone</button>
+          <button id="demo-mode" class="secondary">Use demo audio</button>
         </div>
 
-        <div class="meter-card">
-          <span>Intensity</span>
-          <strong id="intensity">0%</strong>
-        </div>
+        <div class="panel-grid">
+          <label class="slider-card">
+            <span>Sensitivity</span>
+            <input id="sensitivity" type="range" min="0.5" max="2.5" step="0.01" value="1.25" />
+          </label>
 
-        <div class="meter-card">
-          <span>Pedal</span>
-          <strong id="pedal">Off</strong>
-        </div>
+          <div class="meter-card">
+            <span>Status</span>
+            <strong id="status">Idle</strong>
+          </div>
 
-        <div class="meter-card">
-          <span>Pitch</span>
-          <strong id="pitch">--</strong>
-        </div>
+          <div class="meter-card">
+            <span>Intensity</span>
+            <strong id="intensity">0%</strong>
+          </div>
 
-        <div class="meter-card">
-          <span>Mode</span>
-          <strong id="mode">Fugue</strong>
+          <div class="meter-card">
+            <span>Pedal</span>
+            <strong id="pedal">Off</strong>
+          </div>
+
+          <div class="meter-card">
+            <span>Pitch</span>
+            <strong id="pitch">--</strong>
+          </div>
+
+          <div class="meter-card">
+            <span>Key</span>
+            <strong id="key">--</strong>
+          </div>
+
+          <div class="meter-card">
+            <span>Mode</span>
+            <strong id="mode">Fugue</strong>
+          </div>
         </div>
       </div>
     </section>
@@ -61,12 +75,16 @@ app.innerHTML = `
 
 const canvas = document.querySelector('#art');
 const ctx = canvas.getContext('2d', { alpha: true });
+const menuPanel = document.querySelector('#menu');
+const menuContent = document.querySelector('#menu-content');
+const toggleMenuButton = document.querySelector('#toggle-menu');
 const toggleMicButton = document.querySelector('#toggle-mic');
 const demoButton = document.querySelector('#demo-mode');
 const statusLabel = document.querySelector('#status');
 const intensityLabel = document.querySelector('#intensity');
 const pedalLabel = document.querySelector('#pedal');
 const pitchLabel = document.querySelector('#pitch');
+const keyLabel = document.querySelector('#key');
 const modeLabel = document.querySelector('#mode');
 const sensitivitySlider = document.querySelector('#sensitivity');
 
@@ -80,22 +98,30 @@ const state = {
   animationFrame: 0,
   active: false,
   demo: false,
+  menuCollapsed: false,
   sensitivity: Number(sensitivitySlider.value),
   frequencyData: new Uint8Array(1024),
   timeData: new Uint8Array(1024),
-  particles: [],
-  stars: [],
+  paintEvents: [],
+  noiseSeed: Math.random() * 1000,
+  lastEnergy: 0,
+  lastAttackSpawn: 0,
+  accentSeed: Math.random() * Math.PI * 2,
+  keyHistogram: new Array(12).fill(0),
   metrics: {
     energy: 0,
     previousEnergy: 0,
     attack: 0,
     sustain: 0,
+    signalLevel: 0,
     pedal: 0,
     pitchHz: 0,
     pitchConfidence: 0,
     texture: 0,
     mode: 'Fugue',
     noteName: '--',
+    keyName: '--',
+    keyConfidence: 0,
     spectralEntropy: 0,
     bass: 0,
     mid: 0,
@@ -104,13 +130,10 @@ const state = {
   pitchTrail: [],
 };
 
-const palette = {
-  bgA: [10, 12, 24],
-  bgB: [18, 36, 62],
-  accentA: [255, 140, 92],
-  accentB: [84, 233, 205],
-  accentC: [255, 211, 104],
-};
+let currentPalette = DEFAULT_KEY_PALETTE;
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -124,6 +147,149 @@ function rgba(rgb, alpha) {
   return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
 }
 
+function lerpColor(a, b, t) {
+  return [
+    Math.round(mix(a[0], b[0], t)),
+    Math.round(mix(a[1], b[1], t)),
+    Math.round(mix(a[2], b[2], t)),
+  ];
+}
+
+function randomPick(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function rotateProfile(profile, rotation) {
+  return profile.map((_, index) => profile[(index + rotation) % profile.length]);
+}
+
+function scoreKey(histogram, profile) {
+  let dot = 0;
+  let histogramEnergy = 0;
+  let profileEnergy = 0;
+
+  for (let index = 0; index < 12; index += 1) {
+    dot += histogram[index] * profile[index];
+    histogramEnergy += histogram[index] * histogram[index];
+    profileEnergy += profile[index] * profile[index];
+  }
+
+  if (histogramEnergy === 0 || profileEnergy === 0) {
+    return 0;
+  }
+
+  return dot / Math.sqrt(histogramEnergy * profileEnergy);
+}
+
+function estimateKey(pitchTrail) {
+  const histogram = new Array(12).fill(0);
+  let totalWeight = 0;
+
+  for (let index = 0; index < pitchTrail.length; index += 1) {
+    const point = pitchTrail[index];
+    if (!point.frequency || !point.confidence) {
+      continue;
+    }
+
+    const midi = Math.round(69 + 12 * Math.log2(point.frequency / 440));
+    const pitchClass = ((midi % 12) + 12) % 12;
+    const recency = (index + 1) / pitchTrail.length;
+    const weight = point.confidence * mix(0.55, 1.3, recency);
+    histogram[pitchClass] += weight;
+    totalWeight += weight;
+  }
+
+  if (totalWeight <= 0) {
+    return { keyName: '--', keyConfidence: 0 };
+  }
+
+  for (let index = 0; index < histogram.length; index += 1) {
+    histogram[index] /= totalWeight;
+  }
+
+  let bestScore = -Infinity;
+  let secondBestScore = -Infinity;
+  let bestKeyName = '--';
+
+  for (let tonic = 0; tonic < 12; tonic += 1) {
+    const majorScore = scoreKey(histogram, rotateProfile(MAJOR_PROFILE, tonic));
+    const minorScore = scoreKey(histogram, rotateProfile(MINOR_PROFILE, tonic));
+    const majorName = formatKeyName(tonic, 'major');
+    const minorName = formatKeyName(tonic, 'minor');
+
+    for (const [score, name] of [[majorScore, majorName], [minorScore, minorName]]) {
+      if (score > bestScore) {
+        secondBestScore = bestScore;
+        bestScore = score;
+        bestKeyName = name;
+      } else if (score > secondBestScore) {
+        secondBestScore = score;
+      }
+    }
+  }
+
+  const confidence = clamp((bestScore - secondBestScore) / 0.18, 0, 1);
+  return { keyName: bestKeyName, keyConfidence: confidence };
+}
+
+function chooseHue(metrics) {
+  const { bass, treble, mid, pitchConfidence, texture, sustain, keyConfidence } = metrics;
+  const roll = Math.random();
+  const keyBias = clamp(keyConfidence * 0.75 + pitchConfidence * 0.25, 0, 1);
+
+  if (bass > 0.34 && roll < 0.42) {
+    return randomPick(currentPalette.blues.concat(currentPalette.violets));
+  }
+
+  if (treble > 0.34 || pitchConfidence > 0.7) {
+    return roll < 0.5 ? randomPick(currentPalette.cyans) : randomPick(currentPalette.magentas.concat([currentPalette.white]));
+  }
+
+  if (texture > 0.55 || sustain > 0.45) {
+    return roll < 0.55 ? randomPick(currentPalette.violets.concat(currentPalette.magentas)) : randomPick(currentPalette.warms);
+  }
+
+  if (mid > 0.32) {
+    return roll < 0.55 + keyBias * 0.1 ? randomPick(currentPalette.violets) : randomPick(currentPalette.cyans);
+  }
+
+  return roll < 0.7 ? randomPick(currentPalette.blues) : randomPick(currentPalette.violets);
+}
+
+function chooseCompositionAnchor(width, height, metrics, eventType) {
+  const pitchMix = metrics.pitchHz ? clamp((Math.log2(metrics.pitchHz / 55)) / 4.5, 0, 1) : Math.random();
+  const energyBias = clamp(metrics.energy * 0.72 + metrics.attack * 1.1 + metrics.pedal * 0.25, 0, 1);
+  const edgeBias = clamp(metrics.texture * 0.75 + metrics.spectralEntropy * 0.5 + (eventType === 'splatter' ? 0.2 : 0), 0, 1);
+  const edgeChoice = Math.random();
+
+  let x = mix(width * 0.14, width * 0.86, pitchMix);
+  let y = mix(height * 0.82, height * 0.18, 1 - pitchMix * 0.85);
+
+  x += mix(-width * 0.18, width * 0.18, Math.random()) * energyBias;
+  y += mix(-height * 0.14, height * 0.14, Math.random()) * (0.4 + energyBias * 0.6);
+
+  if (edgeChoice < edgeBias * 0.28) {
+    x = mix(width * 0.06, width * 0.94, Math.random());
+    y = Math.random() < 0.5 ? height * (0.08 + Math.random() * 0.12) : height * (0.82 + Math.random() * 0.12);
+  } else if (edgeChoice < edgeBias * 0.56) {
+    x = Math.random() < 0.5 ? width * (0.06 + Math.random() * 0.12) : width * (0.82 + Math.random() * 0.12);
+    y = mix(height * 0.12, height * 0.88, Math.random());
+  }
+
+  return {
+    x: clamp(x, width * 0.03, width * 0.97),
+    y: clamp(y, height * 0.03, height * 0.97),
+  };
+}
+
+function noiseValue(x, y, time) {
+  const waves = Math.sin(x * 0.012 + time * 0.00035 + state.noiseSeed)
+    + Math.cos(y * 0.018 - time * 0.00042 + state.noiseSeed * 1.7)
+    + Math.sin((x + y) * 0.006 + time * 0.0002 + state.noiseSeed * 0.47);
+
+  return (waves + 3) / 6;
+}
+
 function resizeCanvas() {
   const ratio = window.devicePixelRatio || 1;
   const { innerWidth, innerHeight } = window;
@@ -133,15 +299,15 @@ function resizeCanvas() {
   canvas.style.width = `${innerWidth}px`;
   canvas.style.height = `${innerHeight}px`;
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
 
-  if (state.stars.length === 0) {
-    state.stars = Array.from({ length: 160 }, () => ({
-      x: Math.random() * innerWidth,
-      y: Math.random() * innerHeight,
-      r: mix(0.5, 1.8, Math.random()),
-      twinkle: Math.random() * Math.PI * 2,
-    }));
-  }
+function setMenuCollapsed(collapsed) {
+  state.menuCollapsed = collapsed;
+  menuContent.hidden = collapsed;
+  menuPanel.hidden = collapsed;
+  menuPanel.classList.toggle('is-collapsed', collapsed);
+  toggleMenuButton.textContent = collapsed ? 'Show menu' : 'Minimize';
+  toggleMenuButton.setAttribute('aria-expanded', String(!collapsed));
 }
 
 function ensureAudioContext() {
@@ -171,12 +337,20 @@ function frequencyToNoteName(frequency) {
     return '--';
   }
 
-  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
   const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
-  const noteName = noteNames[((midi % 12) + 12) % 12];
+  const noteName = NOTE_NAMES[((midi % 12) + 12) % 12];
   const octave = Math.floor(midi / 12) - 1;
 
   return `${noteName}${octave}`;
+}
+
+function pitchClassFromFrequency(frequency) {
+  if (!frequency || !Number.isFinite(frequency)) {
+    return null;
+  }
+
+  const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
+  return ((midi % 12) + 12) % 12;
 }
 
 function estimatePitch(timeData, sampleRate) {
@@ -284,6 +458,60 @@ function estimateTexture(frequencyData, pitchConfidence) {
   };
 }
 
+function createPaintEvent(width, height, metrics, trigger) {
+  const behaviors = ['splash', 'smear', 'drip', 'streak', 'cloud', 'splatter'];
+  const type = trigger === 'attack' && Math.random() < 0.5 ? randomPick(['splash', 'splatter', 'streak']) : randomPick(behaviors);
+  const anchor = chooseCompositionAnchor(width, height, metrics, type);
+  const color = chooseHue(metrics);
+  const pitchMix = metrics.pitchHz ? clamp((Math.log2(metrics.pitchHz / 55)) / 4.5, 0, 1) : 0.5;
+  const directionAngle = mix(Math.PI * 0.18, Math.PI * 1.82, pitchMix) + mix(-0.65, 0.65, Math.random());
+  const density = clamp(metrics.energy * 1.5 + metrics.attack * 3.4 + metrics.texture * 0.9 + (trigger === 'attack' ? 0.4 : 0), 0.26, 1.9);
+  const radius = mix(32, Math.min(width, height) * 0.18, density) * mix(0.72, 1.18, Math.random());
+  const spread = mix(0.45, 1.85, metrics.texture + Math.random() * 0.45);
+  const drift = mix(0.012, 0.092, metrics.pedal + metrics.sustain * 0.9 + Math.random() * 0.25);
+
+  return {
+    type,
+    x: anchor.x,
+    y: anchor.y,
+    baseX: anchor.x,
+    baseY: anchor.y,
+    vx: Math.cos(directionAngle) * mix(0.04, 1.18, density),
+    vy: Math.sin(directionAngle) * mix(0.04, 1.18, density),
+    color,
+    life: Math.round(mix(64, 220, clamp(metrics.sustain * 0.95 + metrics.pedal * 0.35 + density * 0.24, 0, 1))),
+    age: 0,
+    radius,
+    spread,
+    drift,
+    blur: mix(6, 26, density),
+    opacity: mix(0.2, 0.95, density),
+    width: mix(1.4, 11, density),
+    roughness: mix(0.08, 0.84, metrics.texture + metrics.spectralEntropy * 0.5 + Math.random() * 0.35),
+    sparkle: metrics.treble > 0.34 || Math.random() < 0.25,
+    streakiness: type === 'streak' ? 1 : type === 'smear' ? 0.72 : type === 'drip' ? 0.58 : 0.36,
+    fallSpeed: type === 'drip' ? mix(0.4, 2.2, density) : mix(0.06, 0.48, density),
+    layered: metrics.texture > 0.48 || metrics.attack > 0.09,
+    rotation: Math.random() * Math.PI * 2,
+    wobble: mix(0.1, 0.9, metrics.texture),
+  };
+}
+
+function spawnPaintEvents(width, height, metrics, trigger) {
+  const countBase = trigger === 'attack'
+    ? mix(1.5, 5.5, metrics.attack * 2.8 + metrics.energy * 0.6)
+    : mix(0.4, 2.3, metrics.sustain + metrics.texture * 0.4);
+  const count = Math.max(1, Math.round(countBase + (metrics.texture > 0.52 ? 1 : 0)));
+
+  for (let index = 0; index < count; index += 1) {
+    state.paintEvents.push(createPaintEvent(width, height, metrics, trigger));
+  }
+
+  if (state.paintEvents.length > 160) {
+    state.paintEvents.splice(0, state.paintEvents.length - 160);
+  }
+}
+
 function analyzeFrequencyBands() {
   const { frequencyData, timeData } = state;
   const bassEnd = Math.floor(frequencyData.length * 0.08);
@@ -330,269 +558,229 @@ function analyzeFrequencyBands() {
   state.metrics.spectralEntropy = texture.entropyNorm;
   state.metrics.mode = texture.density > 0.5 || pitch.confidence < 0.35 ? 'Impressionism' : 'Fugue';
   state.metrics.noteName = pitch.frequency ? frequencyToNoteName(pitch.frequency) : '--';
+  state.metrics.keyName = '--';
+  state.metrics.keyConfidence = 0;
+  state.metrics.energy = clamp(state.metrics.energy, 0, 1);
 
   if (pitch.frequency && pitch.confidence > 0.25) {
-    state.pitchTrail.push({ frequency: pitch.frequency, confidence: pitch.confidence });
+    state.pitchTrail.push({ frequency: pitch.frequency, confidence: pitch.confidence, pitchClass: pitchClassFromFrequency(pitch.frequency) });
     if (state.pitchTrail.length > 48) {
       state.pitchTrail.shift();
     }
   } else if (state.pitchTrail.length > 0) {
     state.pitchTrail.shift();
   }
+
+  const keyEstimate = estimateKey(state.pitchTrail);
+  state.metrics.keyName = keyEstimate.keyName;
+  state.metrics.keyConfidence = keyEstimate.keyConfidence;
+  state.metrics.signalLevel = pitch.rms;
 }
-
-function spawnParticles(amount, centerX, centerY, burst, hueMix, intensity = 1) {
-  const nextParticles = Array.from({ length: amount }, () => {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = mix(0.18, 2.8, Math.random()) * burst * mix(0.85, 1.1, intensity);
-    const size = mix(1.1, 3.8, Math.random()) * (0.55 + burst * 0.45) * mix(0.9, 1.2, intensity);
-    const tone = Math.random();
-    return {
-      x: centerX + Math.cos(angle) * mix(0, 24, Math.random()),
-      y: centerY + Math.sin(angle) * mix(0, 24, Math.random()),
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: mix(90, 180, Math.random()) * mix(0.9, 1.15, intensity),
-      age: 0,
-      size,
-      color: tone < 0.5 ? palette.accentA : tone < 0.8 ? palette.accentB : palette.accentC,
-      hueMix,
-      intensity,
-    };
-  });
-
-  state.particles.push(...nextParticles);
-  if (state.particles.length > 280) {
-    state.particles.splice(0, state.particles.length - 280);
-  }
-}
-
 function drawBackground(width, height, time) {
-  const { attack, sustain, pedal, bass, mid, treble, pitchHz, pitchConfidence, texture } = state.metrics;
+  const { attack, sustain, pedal, bass, mid, treble, pitchHz, pitchConfidence, texture, spectralEntropy } = state.metrics;
 
   const pitchMix = pitchHz ? clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1) : 0.5;
-  const pitchX = mix(width * 0.18, width * 0.82, pitchMix);
-  const pitchY = mix(height * 0.76, height * 0.22, pitchMix);
-  const pulseX = mix(width * (0.25 + mid * 0.35), pitchX, pitchConfidence * 0.65);
-  const pulseY = mix(height * (0.35 + treble * 0.25), pitchY, pitchConfidence * 0.65);
-  const bloom = clamp(0.28 + sustain * 1.05 + attack * 1.5 + pedal * 0.55 + texture * 0.35, 0.28, 1.95);
-  const hueLift = clamp((bass * 180) + (treble * 90), 0, 240);
+  const anchorX = mix(width * 0.18, width * 0.8, pitchMix);
+  const anchorY = mix(height * 0.78, height * 0.24, pitchMix * 0.75 + texture * 0.15);
+  const driftX = Math.sin(time * 0.00012 + state.accentSeed) * width * (0.02 + texture * 0.012) + mid * width * 0.12;
+  const driftY = Math.cos(time * 0.00015 + state.accentSeed * 0.7) * height * (0.014 + sustain * 0.014) - bass * height * 0.08;
+  const tintPulse = clamp(0.16 + sustain * 0.86 + attack * 1.42 + pedal * 0.32 + texture * 0.44, 0.16, 1.8);
 
-  const gradient = ctx.createRadialGradient(pulseX, pulseY, 20, pulseX, pulseY, Math.max(width, height) * 0.85);
-  gradient.addColorStop(0, rgba(palette.accentA, 0.14 * bloom));
-  gradient.addColorStop(0.35, rgba(palette.accentB, 0.1 * bloom));
-  gradient.addColorStop(0.72, rgba(palette.accentC, 0.06 * bloom));
-  gradient.addColorStop(1, rgba(palette.bgA, 0.94));
+  const core = ctx.createRadialGradient(anchorX + driftX, anchorY + driftY, 0, anchorX + driftX, anchorY + driftY, Math.max(width, height) * 0.9);
+  core.addColorStop(0, rgba(lerpColor(currentPalette.bgB, chooseHue(state.metrics), 0.25), 0.55 * tintPulse));
+  core.addColorStop(0.34, rgba(lerpColor(currentPalette.bgB, currentPalette.violets[1], 0.6), 0.28 * tintPulse));
+  core.addColorStop(0.68, rgba(lerpColor(currentPalette.bgA, currentPalette.blues[0], 0.5), 0.82));
+  core.addColorStop(1, rgba(currentPalette.bgA, 0.98));
 
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = core;
   ctx.fillRect(0, 0, width, height);
 
   ctx.save();
   ctx.globalCompositeOperation = 'screen';
 
-  for (const star of state.stars) {
-    star.twinkle += 0.004 + sustain * 0.01 + attack * 0.02 + pedal * 0.006 + texture * 0.003;
-    const twinkle = (Math.sin(star.twinkle + time * 0.001) + 1) / 2;
-    ctx.fillStyle = `rgba(${hueLift}, ${180 + treble * 50}, ${220 - bass * 40}, ${0.08 + twinkle * 0.16})`;
+  for (let y = 0; y < height; y += 16) {
+    const bandAlpha = 0.018 + noiseValue(width * 0.5, y, time) * 0.028 + spectralEntropy * 0.01;
+    ctx.fillStyle = `rgba(255, 255, 255, ${bandAlpha})`;
+    ctx.fillRect(0, y, width, 1);
+  }
+
+  const noiseStep = Math.max(20, Math.round(30 - texture * 8));
+  for (let y = 0; y < height; y += noiseStep) {
+    for (let x = 0; x < width; x += noiseStep) {
+      const grain = noiseValue(x + driftX * 0.5, y + driftY * 0.5, time);
+      if (grain < 0.62) {
+        continue;
+      }
+
+      const alpha = (grain - 0.62) * 0.06 + 0.014;
+      const tint = grain > 0.9 ? palette.white : grain > 0.76 ? palette.cyans[1] : palette.violets[0];
+      ctx.fillStyle = rgba(tint, alpha);
+      ctx.fillRect(x + (grain - 0.5) * 3, y + (grain - 0.5) * 3, 1, 1);
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawAmbientFields(width, height, time) {
+  const { bass, mid, treble, sustain, attack, pitchHz, pitchConfidence, texture } = state.metrics;
+  const pitchMix = pitchHz ? clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1) : 0.5;
+  const focalX = mix(width * 0.2, width * 0.82, pitchMix);
+  const focalY = mix(height * 0.78, height * 0.22, clamp(treble * 0.8 + pitchConfidence * 0.2, 0, 1));
+  const glowCount = 3 + Math.round(texture * 4 + attack * 2);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+
+  for (let index = 0; index < glowCount; index += 1) {
+    const angle = time * 0.00016 + index * 1.34 + state.accentSeed;
+    const offsetX = Math.cos(angle) * (width * (0.08 + index * 0.012) + mid * width * 0.08);
+    const offsetY = Math.sin(angle * 1.1) * (height * (0.04 + index * 0.015) + bass * height * 0.05);
+    const radius = Math.min(width, height) * (0.11 + sustain * 0.14 + index * 0.04 + texture * 0.06);
+    const grad = ctx.createRadialGradient(focalX + offsetX, focalY + offsetY, 0, focalX + offsetX, focalY + offsetY, radius);
+    const base = index % 3 === 0 ? currentPalette.violets[1] : index % 3 === 1 ? currentPalette.cyans[1] : currentPalette.magentas[1];
+    grad.addColorStop(0, rgba(base, 0.18 + attack * 0.12));
+    grad.addColorStop(0.36, rgba(lerpColor(base, currentPalette.white, 0.45), 0.07 + sustain * 0.1));
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+    ctx.fillStyle = grad;
     ctx.beginPath();
-    ctx.arc(star.x, star.y, star.r + twinkle * 1.5, 0, Math.PI * 2);
+    ctx.arc(focalX + offsetX, focalY + offsetY, radius, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.restore();
 }
 
-function drawWaveRing(width, height) {
-  const { frequencyData } = state;
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const maxRadius = Math.min(width, height) * 0.28;
-  const modeFactor = state.metrics.mode === 'Impressionism' ? 1.28 : 0.94;
-  const baseRadius = maxRadius * (0.72 + state.metrics.sustain * 0.82 + state.metrics.attack * 0.6 + state.metrics.pedal * 0.35) * modeFactor;
-
+function drawPaintEvents(width, height, time) {
   ctx.save();
-  ctx.translate(centerX, centerY);
   ctx.globalCompositeOperation = 'screen';
-  ctx.lineWidth = 2;
 
-  for (let ring = 0; ring < 3; ring += 1) {
-    const radius = baseRadius + ring * 34;
-    ctx.beginPath();
-    for (let index = 0; index < frequencyData.length; index += 10) {
-      const angle = (index / frequencyData.length) * Math.PI * 2;
-      const sample = frequencyData[index] / 255;
-      const wobble = sample * (11 + ring * 6) * state.sensitivity * modeFactor;
-      const x = Math.cos(angle) * (radius + wobble);
-      const y = Math.sin(angle) * (radius + wobble);
-      if (index === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
+  for (let index = state.paintEvents.length - 1; index >= 0; index -= 1) {
+    const event = state.paintEvents[index];
+    event.age += 1;
+
+    const progress = event.age / event.life;
+    const fade = Math.max(0, 1 - progress);
+    const motion = 1 + state.metrics.texture * 0.45 + state.metrics.pedal * 0.2;
+    const jitter = Math.sin(time * 0.0012 + event.rotation) * event.wobble;
+
+    event.vx *= 0.989;
+    event.vy *= 0.986;
+    event.vx += Math.cos(event.rotation + event.age * 0.03) * event.drift * 0.18;
+    event.vy += event.fallSpeed * 0.08 + Math.sin(event.rotation * 0.7 + event.age * 0.025) * event.drift * 0.08;
+    event.x += event.vx * motion;
+    event.y += event.vy * motion;
+    event.rotation += 0.015 + event.roughness * 0.012;
+
+    const smearLength = event.radius * (0.55 + event.streakiness * 1.4 + state.metrics.attack * 0.5);
+    const alpha = fade * event.opacity * (event.type === 'cloud' ? 0.54 : 0.82);
+    const baseColor = event.color;
+    const spread = event.radius * (0.18 + progress * event.spread + state.metrics.texture * 0.1);
+    const widthScale = event.width * (1 + state.metrics.attack * 1.6 + state.metrics.sustain * 0.5);
+
+    ctx.shadowBlur = event.blur * (0.8 + fade * 0.9);
+    ctx.shadowColor = rgba(baseColor, alpha * 0.9);
+
+    if (event.type === 'cloud') {
+      const cloudRadius = event.radius * (0.45 + progress * 1.2 + event.spread * 0.6);
+      const gradient = ctx.createRadialGradient(event.x, event.y, 0, event.x, event.y, cloudRadius);
+      gradient.addColorStop(0, rgba(lerpColor(baseColor, currentPalette.white, 0.35), alpha * 0.9));
+      gradient.addColorStop(0.36, rgba(baseColor, alpha * 0.4));
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(event.x, event.y, cloudRadius, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      const segments = event.type === 'splatter' ? 9 : event.type === 'splash' ? 7 : event.type === 'smear' ? 8 : 6;
+
+      for (let fragment = 0; fragment < segments; fragment += 1) {
+        const fragmentT = segments === 1 ? 0 : fragment / (segments - 1);
+        const arm = event.type === 'drip'
+          ? fragmentT * smearLength
+          : fragmentT * event.radius * (0.45 + event.spread);
+        const angle = event.rotation + fragmentT * Math.PI * 2 + jitter * 0.15;
+        const fx = event.x + Math.cos(angle) * arm + Math.sin(angle * 2.4 + jitter) * spread * 0.7;
+        const fy = event.y + Math.sin(angle) * arm * 0.42 + fragmentT * smearLength * 0.3 + Math.cos(angle * 1.6) * spread * 0.35;
+        const fragmentRadius = Math.max(0.8, widthScale * (0.35 + Math.sin(fragmentT * Math.PI) * 0.9 + event.roughness * 0.3));
+
+        ctx.fillStyle = rgba(baseColor, alpha * (0.22 + fragmentT * 0.78));
+        ctx.beginPath();
+        ctx.arc(fx, fy, fragmentRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (event.type === 'smear' || event.type === 'streak') {
+          ctx.strokeStyle = rgba(lerpColor(baseColor, currentPalette.white, 0.2), alpha * 0.25);
+          ctx.lineWidth = Math.max(0.8, widthScale * 0.16);
+          ctx.beginPath();
+          ctx.moveTo(fx, fy);
+          ctx.lineTo(fx - Math.cos(angle) * smearLength * 0.32, fy - Math.sin(angle) * smearLength * 0.18);
+          ctx.stroke();
+        }
+      }
+
+      if (event.type === 'drip') {
+        const dripCount = 2 + Math.round(event.roughness * 4);
+        for (let drip = 0; drip < dripCount; drip += 1) {
+          const dripX = event.x + Math.sin(event.rotation + drip * 0.7) * event.radius * 0.18;
+          const dripY = event.y + progress * event.life * 0.22 + drip * event.radius * 0.14;
+          ctx.fillStyle = rgba(lerpColor(baseColor, currentPalette.white, 0.12), alpha * 0.28);
+          ctx.fillRect(dripX, dripY, Math.max(1, widthScale * 0.14), smearLength * 0.26);
+        }
+      }
+
+      if (event.sparkle && progress < 0.72) {
+        ctx.fillStyle = rgba(currentPalette.white, alpha * 0.5);
+        ctx.beginPath();
+        ctx.arc(event.x + Math.sin(time * 0.002 + event.rotation) * 5, event.y + Math.cos(time * 0.0021 + event.rotation) * 5, Math.max(0.9, widthScale * 0.28), 0, Math.PI * 2);
+        ctx.fill();
       }
     }
-    ctx.closePath();
-    ctx.strokeStyle = ring === 0 ? rgba(palette.accentA, state.metrics.mode === 'Impressionism' ? 0.18 : 0.24) : ring === 1 ? rgba(palette.accentB, state.metrics.mode === 'Impressionism' ? 0.16 : 0.2) : rgba(palette.accentC, state.metrics.mode === 'Impressionism' ? 0.14 : 0.16);
-    ctx.shadowBlur = 18 + state.metrics.sustain * 12 + state.metrics.pedal * 10 + (state.metrics.mode === 'Impressionism' ? 8 : 0);
-    ctx.shadowColor = ring === 0 ? rgba(palette.accentA, 0.8) : ring === 1 ? rgba(palette.accentB, 0.75) : rgba(palette.accentC, 0.7);
-    ctx.stroke();
+
+    if (progress >= 1) {
+      state.paintEvents.splice(index, 1);
+    }
   }
 
   ctx.restore();
 }
 
-function drawParticles(width, height, time) {
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const gravity = 0.006 + state.metrics.bass * 0.02 - state.metrics.pedal * 0.003;
-  const modeFactor = state.metrics.mode === 'Impressionism' ? 1.1 : 0.92;
-
-  ctx.save();
-  ctx.globalCompositeOperation = 'screen';
-
-  for (let index = state.particles.length - 1; index >= 0; index -= 1) {
-    const particle = state.particles[index];
-    particle.age += 1;
-    particle.vx *= 0.9925;
-    particle.vy *= 0.9925;
-    particle.vy += gravity * 0.5;
-    particle.x += particle.vx;
-    particle.y += particle.vy;
-
-    const progress = particle.age / particle.life;
-    const alpha = Math.max(0, 1 - progress);
-    const size = particle.size * (1 + state.metrics.sustain * 0.65 + state.metrics.pedal * 0.25 + particle.intensity * 0.35) * modeFactor;
-
-    ctx.fillStyle = rgba(particle.color, alpha * (state.metrics.mode === 'Impressionism' ? 0.56 : 0.72));
-    ctx.shadowBlur = 14 + size * 2.2 + state.metrics.pedal * 6;
-    ctx.shadowColor = rgba(particle.color, alpha * 0.85);
-    ctx.beginPath();
-    ctx.arc(particle.x, particle.y, size, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (progress > 0.35) {
-      ctx.strokeStyle = rgba(particle.color, alpha * 0.22);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(particle.x, particle.y);
-      ctx.lineTo(particle.x - particle.vx * 4, particle.y - particle.vy * 4);
-      ctx.stroke();
-    }
-
-    if (particle.age >= particle.life) {
-      state.particles.splice(index, 1);
-    }
-  }
-
-  const orbitRadius = Math.min(width, height) * 0.18;
-  const orbitCount = 8;
-  const orbitAlpha = 0.12 + state.metrics.treble * 0.14;
-
-  for (let index = 0; index < orbitCount; index += 1) {
-    const angle = (index / orbitCount) * Math.PI * 2 + time * 0.0005;
-    const pulse = state.metrics.sustain * 16 + state.metrics.attack * 24 + state.metrics.pedal * 10 + Math.sin(time * 0.001 + index) * 3;
-    const x = centerX + Math.cos(angle) * (orbitRadius + pulse);
-    const y = centerY + Math.sin(angle) * (orbitRadius + pulse * 0.42);
-
-    ctx.fillStyle = rgba(index % 2 === 0 ? palette.accentB : palette.accentA, orbitAlpha);
-    ctx.beginPath();
-    ctx.arc(x, y, 3 + state.metrics.mid * 7 + state.metrics.attack * 2 + state.metrics.pedal * 1.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.restore();
-}
-
-function drawFugueMode(width, height, time) {
-  const { pitchHz, pitchConfidence, sustain } = state.metrics;
-  if (!pitchHz || pitchConfidence < 0.25) {
+function drawBrushTrail(width, height, time) {
+  const { pitchHz, pitchConfidence, sustain, texture } = state.metrics;
+  if (!pitchHz || pitchConfidence < 0.18) {
     return;
   }
 
   const pitchMix = clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1);
-  const noteY = mix(height * 0.78, height * 0.2, pitchMix);
-  const staffTop = height * 0.2;
-  const staffSpacing = Math.max(12, height * 0.022);
-  const staffLeft = width * 0.08;
-  const staffRight = width * 0.92;
+  const pathCount = 8 + Math.round(texture * 4);
 
   ctx.save();
   ctx.globalCompositeOperation = 'screen';
 
-  for (let line = 0; line < 5; line += 1) {
-    const y = staffTop + line * staffSpacing;
-    ctx.beginPath();
-    ctx.moveTo(staffLeft, y);
-    ctx.lineTo(staffRight, y + Math.sin(time * 0.0003 + line) * (1.5 + sustain * 2));
-    ctx.strokeStyle = rgba(palette.accentB, 0.07 + pitchConfidence * 0.12);
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-
-  if (state.pitchTrail.length > 1) {
-    ctx.beginPath();
-    state.pitchTrail.forEach((point, index) => {
-      const trailX = mix(staffLeft, staffRight, index / Math.max(state.pitchTrail.length - 1, 1));
-      const trailPitchMix = clamp((Math.log2(point.frequency / 55)) / 4.5, 0, 1);
-      const trailY = mix(height * 0.78, height * 0.2, trailPitchMix);
-      if (index === 0) {
-        ctx.moveTo(trailX, trailY);
-      } else {
-        ctx.lineTo(trailX, trailY);
-      }
-    });
-    ctx.strokeStyle = rgba(palette.accentA, 0.16 + pitchConfidence * 0.28);
-    ctx.lineWidth = 2 + sustain * 2.2;
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = rgba(palette.accentC, 0.18 + pitchConfidence * 0.35);
-  ctx.shadowBlur = 16 + pitchConfidence * 18;
-  ctx.shadowColor = rgba(palette.accentC, 0.7);
   ctx.beginPath();
-  ctx.arc(width * 0.5, noteY, 10 + pitchConfidence * 16 + state.metrics.pedal * 7, 0, Math.PI * 2);
+  for (let index = 0; index < pathCount; index += 1) {
+    const t = pathCount === 1 ? 0 : index / (pathCount - 1);
+    const x = mix(width * 0.08, width * 0.92, t);
+    const y = mix(height * 0.76, height * 0.24, pitchMix) + Math.sin(time * 0.00045 + index * 0.9) * (10 + sustain * 26);
+    if (index === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.strokeStyle = rgba(currentPalette.white, 0.06 + pitchConfidence * 0.14);
+  ctx.lineWidth = 1.2 + sustain * 1.8;
+  ctx.stroke();
+
+  const noteX = mix(width * 0.14, width * 0.86, pitchMix);
+  const noteY = mix(height * 0.74, height * 0.22, pitchMix);
+  ctx.fillStyle = rgba(currentPalette.cyans[2], 0.12 + pitchConfidence * 0.24);
+  ctx.shadowBlur = 12 + pitchConfidence * 12;
+  ctx.shadowColor = rgba(currentPalette.cyans[1], 0.8);
+  ctx.beginPath();
+  ctx.arc(noteX, noteY, 8 + pitchConfidence * 14, 0, Math.PI * 2);
   ctx.fill();
-
-  ctx.restore();
-}
-
-function drawImpressionismMode(width, height, time) {
-  const { pitchHz, pitchConfidence, texture, sustain, pedal, bass, treble } = state.metrics;
-  const pitchMix = pitchHz ? clamp((Math.log2(pitchHz / 55)) / 4.5, 0, 1) : 0.5;
-  const centerX = mix(width * 0.24, width * 0.76, pitchMix);
-  const centerY = mix(height * 0.72, height * 0.25, 1 - pitchMix * 0.7);
-  const radius = Math.min(width, height) * (0.16 + texture * 0.18 + pedal * 0.08);
-
-  ctx.save();
-  ctx.globalCompositeOperation = 'screen';
-
-  for (let layer = 0; layer < 6; layer += 1) {
-    const layerAngle = time * 0.0002 + layer * 1.12;
-    const offsetX = Math.cos(layerAngle) * radius * (0.45 + layer * 0.08);
-    const offsetY = Math.sin(layerAngle * 1.17) * radius * (0.28 + layer * 0.07);
-    const cloudRadius = radius * (0.7 + layer * 0.18 + sustain * 0.2);
-    const gradient = ctx.createRadialGradient(centerX + offsetX, centerY + offsetY, 0, centerX + offsetX, centerY + offsetY, cloudRadius);
-    gradient.addColorStop(0, rgba(palette.accentA, 0.14 + texture * 0.12));
-    gradient.addColorStop(0.34, rgba(palette.accentB, 0.11 + pitchConfidence * 0.1));
-    gradient.addColorStop(0.68, rgba(palette.accentC, 0.08 + treble * 0.08));
-    gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(centerX + offsetX, centerY + offsetY, cloudRadius, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  const washCount = 5 + Math.round(texture * 5);
-  for (let index = 0; index < washCount; index += 1) {
-    const angle = (index / Math.max(washCount, 1)) * Math.PI * 2 + time * 0.0001;
-    const washRadius = radius * (0.6 + (index % 3) * 0.18 + bass * 0.12);
-    const x = centerX + Math.cos(angle) * washRadius;
-    const y = centerY + Math.sin(angle) * washRadius;
-    ctx.fillStyle = rgba(index % 2 === 0 ? palette.accentB : palette.accentA, 0.03 + texture * 0.08);
-    ctx.beginPath();
-    ctx.arc(x, y, 18 + texture * 38 + pedal * 10, 0, Math.PI * 2);
-    ctx.fill();
-  }
 
   ctx.restore();
 }
@@ -610,16 +798,47 @@ function render(time) {
     intensityLabel.textContent = `${Math.round(energy * 100)}%`;
     pedalLabel.textContent = `${Math.round(state.metrics.pedal * 100)}%`;
     pitchLabel.textContent = state.metrics.noteName === '--' ? '--' : `${state.metrics.noteName} · ${Math.round(state.metrics.pitchHz)} Hz`;
+    keyLabel.textContent = `${state.metrics.keyName} ${state.metrics.keyConfidence > 0 ? `· ${Math.round(state.metrics.keyConfidence * 100)}%` : ''}`.trim();
     modeLabel.textContent = state.metrics.mode;
     setStatus(`${state.demo ? 'Demo audio' : 'Listening'} · ${state.metrics.mode}`);
 
-    if (state.metrics.attack > 0.04) {
-      const attackBurst = clamp(state.metrics.attack * 6, 0.8, 5.5);
-      spawnParticles(Math.max(1, Math.round(attackBurst)), width / 2, height / 2, attackBurst, state.metrics.treble, 1 + state.metrics.pedal * 0.2);
-    } else if (state.metrics.sustain > 0.12) {
-      const sustainBurst = clamp(state.metrics.sustain * 3, 0.5, 3);
-      spawnParticles(1, width / 2, height / 2, sustainBurst, state.metrics.mid, 0.7 + state.metrics.pedal * 0.15);
+    currentPalette = getKeyPalette(state.metrics.keyName);
+
+    const liveLevel = clamp(state.metrics.signalLevel * 12, 0, 1);
+    if (!state.micPrimed) {
+      spawnPaintEvents(width, height, {
+        ...state.metrics,
+        energy: Math.max(state.metrics.energy, 0.12),
+        attack: 0.12,
+        sustain: 0.35,
+        texture: Math.max(state.metrics.texture, 0.28),
+      }, 'attack');
+      state.micPrimed = true;
     }
+
+    const attackReady = state.metrics.attack > 0.035 && (energy - state.lastEnergy > 0.01 || time - state.lastAttackSpawn > 120);
+    if (attackReady) {
+      spawnPaintEvents(width, height, state.metrics, 'attack');
+      state.lastAttackSpawn = time;
+    }
+
+    if (state.metrics.sustain > 0.12 && Math.random() < 0.03 + state.metrics.texture * 0.035) {
+      spawnPaintEvents(width, height, state.metrics, 'sustain');
+    }
+
+    if (state.metrics.texture > 0.6 && Math.random() < 0.02 + state.metrics.texture * 0.025) {
+      spawnPaintEvents(width, height, state.metrics, 'texture');
+    }
+
+    if (liveLevel > 0.08 && Math.random() < liveLevel * 0.35) {
+      spawnPaintEvents(width, height, {
+        ...state.metrics,
+        energy: Math.max(state.metrics.energy, liveLevel * 0.55),
+        sustain: Math.max(state.metrics.sustain, liveLevel * 0.45),
+        texture: Math.max(state.metrics.texture, liveLevel * 0.5),
+      }, 'sustain');
+    }
+    state.lastEnergy = energy;
   } else if (!state.demo) {
     state.metrics.energy *= 0.97;
     state.metrics.previousEnergy *= 0.97;
@@ -629,6 +848,7 @@ function render(time) {
     state.metrics.pitchHz = 0;
     state.metrics.pitchConfidence = 0;
     state.metrics.texture *= 0.95;
+    state.metrics.signalLevel *= 0.9;
     state.metrics.mode = 'Fugue';
     state.metrics.noteName = '--';
     state.metrics.bass *= 0.95;
@@ -637,18 +857,17 @@ function render(time) {
     intensityLabel.textContent = `${Math.round(state.metrics.energy * 100)}%`;
     pedalLabel.textContent = `${Math.round(state.metrics.pedal * 100)}%`;
     pitchLabel.textContent = '--';
+    keyLabel.textContent = '--';
     modeLabel.textContent = 'Fugue';
     setStatus('Idle');
+    currentPalette = DEFAULT_KEY_PALETTE;
+    state.micPrimed = false;
   }
 
   drawBackground(width, height, time);
-  drawWaveRing(width, height);
-  drawParticles(width, height, time);
-  if (state.metrics.mode === 'Fugue') {
-    drawFugueMode(width, height, time);
-  } else {
-    drawImpressionismMode(width, height, time);
-  }
+  drawAmbientFields(width, height, time);
+  drawPaintEvents(width, height, time);
+  drawBrushTrail(width, height, time);
 
   state.animationFrame = requestAnimationFrame(render);
 }
@@ -659,6 +878,7 @@ async function startMic() {
   }
 
   state.demo = false;
+  state.micPrimed = false;
   ensureAudioContext();
   await state.audioContext.resume();
 
@@ -732,7 +952,6 @@ async function enableDemoAudio() {
   modGain.connect(state.oscillator.frequency);
   state.oscillator.connect(state.demoGain);
   state.demoGain.connect(state.analyser);
-  state.analyser.connect(state.audioContext.destination);
 
   await state.audioContext.resume();
   state.oscillator.start();
@@ -802,9 +1021,31 @@ sensitivitySlider.addEventListener('input', (event) => {
   updateSensitivity(event.target.value);
 });
 
+toggleMenuButton.addEventListener('click', () => {
+  setMenuCollapsed(!state.menuCollapsed);
+});
+
+window.addEventListener('keydown', (event) => {
+  const target = event.target;
+  const isTypingField = target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable);
+
+  if (isTypingField) {
+    return;
+  }
+
+  if (event.key === 'o' || event.key === 'O') {
+    setMenuCollapsed(false);
+  }
+
+  if (event.key === 'h' || event.key === 'H') {
+    setMenuCollapsed(true);
+  }
+});
+
 window.addEventListener('resize', resizeCanvas);
 
 updateSensitivity(sensitivitySlider.value);
 resizeCanvas();
+setMenuCollapsed(true);
 setStatus('Idle');
 render(performance.now());
